@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 0.14.9"
+  required_version = ">= 0.15.0"
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
@@ -34,32 +34,115 @@ resource "azurerm_storage_account" "st" {
   resource_group_name      = azurerm_resource_group.rg.name
 }
 
-# Storage container for terraform state
+# Storage containers
 resource "azurerm_storage_container" "devops" {
   name                 = "devops"
   storage_account_name = azurerm_storage_account.st.name
 }
 
-# Used for Key Vault tenant_id
-data "azurerm_client_config" "current" {}
+resource "azurerm_storage_container" "iot_dlq" {
+  name                 = "iot-dlq"
+  storage_account_name = azurerm_storage_account.st.name
+}
 
-# Key Vault
-resource "azurerm_key_vault" "kv" {
+# Tables
+resource "azurerm_storage_table" "user" {
+  name                 = "User"
+  storage_account_name = azurerm_storage_account.st.name
+}
+
+resource "azurerm_storage_table" "device" {
+  name                 = "Device"
+  storage_account_name = azurerm_storage_account.st.name
+}
+
+resource "azurerm_storage_table" "device_telemetry" {
+  name                 = "DeviceTelemetry"
+  storage_account_name = azurerm_storage_account.st.name
+}
+
+resource "azurerm_storage_table" "summary" {
+  name                 = "Summary"
+  storage_account_name = azurerm_storage_account.st.name
+}
+
+# Queues
+resource "azurerm_storage_queue" "summary_requests" {
+  name                 = "summary-requests"
+  storage_account_name = azurerm_storage_account.st.name
+}
+
+resource "azurerm_storage_queue" "summary_requests_poison" {
+  name                 = "summary-requests-poison"
+  storage_account_name = azurerm_storage_account.st.name
+}
+
+# App Service plan
+resource "azurerm_app_service_plan" "plan" {
+  kind                = "linux"
   location            = azurerm_resource_group.rg.location
-  name                = "kv-lc"
+  name                = "plan-lc"
+  reserved            = true
   resource_group_name = azurerm_resource_group.rg.name
-  sku_name            = "standard"
-  tenant_id           = data.azurerm_client_config.current.tenant_id
+  sku {
+    size = "B1"
+    tier = "Basic"
+  }
 }
 
-# Key Vault data source
-data "azurerm_key_vault" "kv_data" {
-  name                = azurerm_key_vault.kv.name
-  resource_group_name = azurerm_key_vault.kv.resource_group_name
+# Function App: Flume Data Pipeline
+resource "azurerm_function_app" "func_flume" {
+  app_service_plan_id        = azurerm_app_service_plan.plan.id
+  location                   = azurerm_resource_group.rg.location
+  name                       = "func-lc-flume"
+  os_type                    = "linux"
+  resource_group_name        = azurerm_resource_group.rg.name
+  storage_account_access_key = azurerm_storage_account.st.primary_access_key
+  storage_account_name       = azurerm_storage_account.st.name
+  version                    = "~3"
+  site_config {
+    always_on = true
+  }
 }
 
-# Access key for storage account (used for terraform state updates)
-data "azurerm_key_vault_secret" "stlc_access_key" {
-  name         = "stlc-access-key"
-  key_vault_id = data.azurerm_key_vault.kv_data.id
+resource "azurerm_application_insights" "appi_flume" {
+  name                = "appi-lc-flume"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  application_type    = "web"
+}
+
+# IoT Hub
+resource "azurerm_iothub" "iot" {
+  location            = azurerm_resource_group.rg.location
+  name                = "iot-lc"
+  resource_group_name = azurerm_resource_group.rg.name
+  sku {
+    name     = "F1"
+    capacity = "1"
+  }
+}
+
+# Event Grid System Topic
+resource "azurerm_eventgrid_system_topic" "evgt" {
+  location               = azurerm_resource_group.rg.location
+  name                   = "evgt-lc"
+  resource_group_name    = azurerm_resource_group.rg.name
+  source_arm_resource_id = azurerm_iothub.iot.id
+  topic_type             = "Microsoft.Devices.IoTHubs"
+}
+
+resource "azurerm_eventgrid_event_subscription" "device_telemetry" {
+  included_event_types = ["Microsoft.Devices.DeviceTelemetry"]
+  name                 = "DeviceTelemetry"
+  scope                = azurerm_iothub.iot.id
+  azure_function_endpoint {
+    function_id                       = "${azurerm_function_app.func_flume.id}/functions/InsertTelemetry"
+    max_events_per_batch              = 1
+    preferred_batch_size_in_kilobytes = 64
+  }
+  storage_blob_dead_letter_destination {
+    storage_account_id          = azurerm_storage_account.st.id
+    storage_blob_container_name = azurerm_storage_container.iot_dlq.name
+  }
 }
