@@ -112,6 +112,28 @@ resource "azurerm_application_insights" "appi_flume" {
   application_type    = "web"
 }
 
+# # Function App: Log Cabin API
+resource "azurerm_function_app" "func_api" {
+  app_service_plan_id        = azurerm_app_service_plan.plan.id
+  location                   = azurerm_resource_group.rg.location
+  name                       = "func-lc-api"
+  os_type                    = "linux"
+  resource_group_name        = azurerm_resource_group.rg.name
+  storage_account_access_key = azurerm_storage_account.st.primary_access_key
+  storage_account_name       = azurerm_storage_account.st.name
+  version                    = "~3"
+  site_config {
+    always_on = true
+  }
+}
+
+resource "azurerm_application_insights" "appi_api" {
+  name                = "appi-lc-api"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  application_type    = "web"
+}
+
 # IoT Hub
 resource "azurerm_iothub" "iot" {
   location            = azurerm_resource_group.rg.location
@@ -145,4 +167,26 @@ resource "azurerm_eventgrid_event_subscription" "device_telemetry" {
     storage_account_id          = azurerm_storage_account.st.id
     storage_blob_container_name = azurerm_storage_container.iot_dlq.name
   }
+}
+
+resource "azuread_application" "ad_app" {
+  available_to_other_tenants = true
+  display_name               = "Log Cabin"
+  reply_urls                 = ["http://localhost:3000/"]
+  required_resource_access {
+    resource_app_id = "00000003-0000-0000-c000-000000000000"
+    resource_access {
+      id   = "e1fe6dd8-ba31-4d61-89e7-88639da4683d"
+      type = "Scope"
+    }
+  }
+}
+
+resource "azurerm_api_management" "apim" {
+  location            = azurerm_resource_group.rg.location
+  name                = "log-cabin"
+  publisher_email     = "finn.welsford-ackroyd@pm.me"
+  publisher_name      = "Log Cabin"
+  resource_group_name = azurerm_resource_group.rg.name
+  sku_name            = "Consumption_0"
 }
